@@ -1,0 +1,812 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <!-- <link rel="icon" type="image/svg+xml" href="app-logo.svg" /> -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><text x='0' y='15' font-size='15'>🎬</text></svg>"
+      type="image/svg+xml"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MimicMe - MoveMentor</title>
+    <script src="https://unpkg.com/mithril/mithril.js"></script>
+    <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection/dist/movenet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      .originalDiv {
+        margin: 6px;
+      }
+      .reenactmentDiv {
+        padding: 6px;
+        margin-left: 20%;
+      }
+      .webcamControls > button {
+        padding: 6px;
+        margin-left: 2%;
+      }
+      .vidCamPrevDiv {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+      }
+
+      video {
+        margin: 10px 0;
+        border: 1px solid #ccc;
+      }
+      canvas {
+        display: none;
+      }
+      .score {
+        font-size: 1.5em;
+        margin-top: 20px;
+      }
+      button {
+        width: 150px;
+        background-color: black;
+        color: white;
+        margin: 5px;
+        padding: 8px 12px;
+        border: none;
+      }
+      button:hover {
+        background-color: white;
+        color: black;
+        border: 1px solid black;
+        cursor: pointer;
+      }
+
+      .wrapper {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        padding: 4px;
+      }
+      .spinner {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 2px solid #ccc;
+        border-top: 2px solid #333;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <script>
+      let state = {
+        originalClip: null,
+        reenactmentClip: null,
+        score: null,
+        detector: null,
+        recording: false,
+        mediaRecorder: null,
+        stream: null,
+        recordedChunks: [],
+        analyzing: false,
+        reenactmentSource: "webcam", // "webcam" or "upload"
+        countdown: null, // Video record delay timer
+        progress: 0, // percentage of reenactment completed
+        maxDuration: 60, // configurable limit in seconds
+      };
+
+      // Utility: detect video duration
+      function getVideoDuration(url) {
+        return new Promise((resolve) => {
+          const video = document.createElement("video");
+          video.src = url;
+          video.onloadedmetadata = () => {
+            resolve(video.duration); // duration in seconds
+          };
+        });
+      }
+
+      function resetState() {
+        if (
+          confirm(
+            "Are you sure you want to reset? This will clear all clips and results.",
+          )
+        ) {
+          state.originalClip = null; // Remove this if you want to keep the original upload
+          state.reenactmentClip = null;
+          state.score = null;
+          state.recordedChunks = [];
+          state.recording = false;
+          state.mediaRecorder = null;
+          state.stream = null;
+          state.countdown = null;
+          state.progress = 0;
+          m.redraw();
+        }
+      }
+
+      // // Upload handler
+      // function uploadFile(e, type) {
+      //   const file = e.target.files[0];
+      //   if (file) {
+      //     const url = URL.createObjectURL(file);
+      //     state[type] = url;
+      //     m.redraw();
+      //   }
+      // }
+      // Upload handler with duration validation
+      function uploadFile(e, type) {
+        const file = e.target.files[0];
+        if (file) {
+          const url = URL.createObjectURL(file);
+
+          // Check duration if it's a video
+          if (file.type.startsWith("video")) {
+            getVideoDuration(url).then((duration) => {
+              if (duration > state.maxDuration) {
+                // limit to pre-defined seconds
+                alert(`Clip must be ${state.maxDuration} seconds or less.`);
+                return; // reject file
+              }
+              state[type] = url;
+              m.redraw();
+            });
+          } else {
+            // For images or other types, just accept
+            state[type] = url;
+            m.redraw();
+          }
+        }
+      }
+
+      // // Pose detection setup
+      // async function initDetector() {
+      //   if (!state.detector) {
+      //     state.detector = await poseDetection.createDetector(
+      //       poseDetection.SupportedModels.MoveNet,
+      //       { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING },
+      //     );
+      //   }
+      // }
+
+      // // Extract poses from video
+      // async function extractPoses(videoEl) {
+      //   const canvas = document.createElement("canvas");
+      //   const ctx = canvas.getContext("2d");
+      //   let poses = [];
+
+      //   return new Promise((resolve) => {
+      //     videoEl.addEventListener("loadeddata", async () => {
+      //       canvas.width = videoEl.videoWidth;
+      //       canvas.height = videoEl.videoHeight;
+
+      //       let interval = setInterval(async () => {
+      //         if (videoEl.paused || videoEl.ended) {
+      //           clearInterval(interval);
+      //           resolve(poses);
+      //         } else {
+      //           ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      //           const pose = await state.detector.estimatePoses(canvas);
+      //           if (pose.length > 0) poses.push(pose[0]);
+      //         }
+      //       }, 500); // sample every 0.5s
+      //     });
+      //     videoEl.play();
+      //   });
+      // }
+
+      // // Compare two sets of poses
+      // function comparePoses(posesA, posesB) {
+      //   let scores = [];
+      //   let len = Math.min(posesA.length, posesB.length);
+
+      //   for (let i = 0; i < len; i++) {
+      //     let keypointsA = posesA[i].keypoints;
+      //     let keypointsB = posesB[i].keypoints;
+      //     let sum = 0,
+      //       count = 0;
+
+      //     for (let j = 0; j < keypointsA.length; j++) {
+      //       let ax = keypointsA[j].x,
+      //         ay = keypointsA[j].y;
+      //       let bx = keypointsB[j].x,
+      //         by = keypointsB[j].y;
+      //       let dist = Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2);
+      //       sum += dist;
+      //       count++;
+      //     }
+      //     let avgDist = sum / count;
+      //     let similarity = Math.max(0, 100 - avgDist / 5); // crude scaling
+      //     scores.push(similarity);
+      //   }
+      //   return scores.reduce((a, b) => a + b, 0) / scores.length;
+      // }
+
+      // // Main analysis
+      // async function analyzeVideos() {
+      //   await initDetector();
+      //   console.log("InitDetector ran?");
+      //   let origVideo = document.createElement("video");
+      //   origVideo.src = state.originalClip;
+      //   origVideo.crossOrigin = "anonymous";
+
+      //   let reenVideo = document.createElement("video");
+      //   reenVideo.src = state.reenactmentClip;
+      //   reenVideo.crossOrigin = "anonymous";
+
+      //   let posesA = await extractPoses(origVideo);
+      //   let posesB = await extractPoses(reenVideo);
+
+      //   state.score = comparePoses(posesA, posesB).toFixed(1);
+
+      //   if (state.score >= 90) {
+      //     confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+      //   } else {
+      //     alert("Your performance was below 90%..");
+      //   }
+
+      //   m.redraw();
+      // }
+
+      // Pose detector initialization (singleton)
+      async function initDetector() {
+        if (!state.detector) {
+          state.detector = await poseDetection.createDetector(
+            poseDetection.SupportedModels.MoveNet,
+            { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING },
+          );
+        }
+      }
+
+      async function extractPoses(videoEl) {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        let poses = [];
+
+        return new Promise((resolve) => {
+          const start = async () => {
+            canvas.width = videoEl.videoWidth;
+            canvas.height = videoEl.videoHeight;
+
+            const step = async () => {
+              if (videoEl.paused || videoEl.ended) {
+                resolve(poses);
+                return;
+              }
+              ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+              const pose = await state.detector.estimatePoses(canvas);
+              if (pose.length > 0) poses.push(pose[0]);
+              // console.log("Poses ", poses);
+              requestAnimationFrame(step);
+            };
+
+            videoEl
+              .play()
+              .catch((err) => console.error("Video play failed:", err));
+            step();
+          };
+
+          if (videoEl.readyState >= 2) {
+            videoEl.muted = true;
+            start();
+          } else {
+            videoEl.onloadeddata = start;
+          }
+        });
+      }
+
+      // Normalize keypoints relative to video dimensions
+      function normalizeKeypoints(keypoints, width, height) {
+        return keypoints.map((kp) => ({
+          x: kp.x / width,
+          y: kp.y / height,
+          score: kp.score,
+        }));
+      }
+
+      // Compare two sets of poses with normalization + confidence weighting
+      function comparePoses(posesA, posesB, widthA, heightA, widthB, heightB) {
+        let scores = [];
+        let len = Math.min(posesA.length, posesB.length);
+
+        for (let i = 0; i < len; i++) {
+          let keypointsA = normalizeKeypoints(
+            posesA[i].keypoints,
+            widthA,
+            heightA,
+          );
+          let keypointsB = normalizeKeypoints(
+            posesB[i].keypoints,
+            widthB,
+            heightB,
+          );
+
+          let sum = 0,
+            weightSum = 0;
+
+          for (let j = 0; j < keypointsA.length; j++) {
+            let ax = keypointsA[j].x,
+              ay = keypointsA[j].y;
+            let bx = keypointsB[j].x,
+              by = keypointsB[j].y;
+
+            let dist = Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2);
+            let weight = (keypointsA[j].score + keypointsB[j].score) / 2;
+
+            sum += dist * weight;
+            weightSum += weight;
+          }
+
+          let avgDist =
+            weightSum > 0 ? sum / weightSum : sum / keypointsA.length;
+          let similarity = Math.max(0, 100 - avgDist * 200); // scaling factor
+          scores.push(similarity);
+        }
+
+        return scores.reduce((a, b) => a + b, 0) / scores.length;
+      }
+
+      // // Main analysis
+      // async function analyzeVideos() {
+      //   state.analyzing = true;
+      //   await initDetector();
+
+      //   console.log("initDetector ran???");
+      //   let origVideo = document.createElement("video");
+      //   origVideo.src = state.originalClip;
+      //   origVideo.crossOrigin = "anonymous";
+
+      //   let reenVideo = document.createElement("video");
+      //   reenVideo.src = state.reenactmentClip;
+      //   reenVideo.crossOrigin = "anonymous";
+
+      //   let posesA = await extractPoses(origVideo);
+      //   let posesB = await extractPoses(reenVideo);
+
+      //   state.score = comparePoses(
+      //     posesA,
+      //     posesB,
+      //     origVideo.videoWidth,
+      //     origVideo.videoHeight,
+      //     reenVideo.videoWidth,
+      //     reenVideo.videoHeight,
+      //   ).toFixed(1);
+
+      //   if (state.score >= 90) {
+      //     confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+      //     state.analyzing = false;
+      //   } else {
+      //     alert("Your performance was below 90%..");
+      //     state.analyzing = false;
+      //   }
+
+      //   m.redraw();
+      // }
+      async function analyzeVideos() {
+        await initDetector();
+        state.analyzing = true;
+        m.redraw();
+
+        // Original clip (always from upload)
+        let origVideo = document.createElement("video");
+        origVideo.src = state.originalClip;
+        origVideo.crossOrigin = "anonymous";
+
+        // Reenactment clip: webcam recording OR upload
+        let reenVideo = document.createElement("video");
+        reenVideo.crossOrigin = "anonymous";
+
+        if (state.reenactmentSource === "webcam") {
+          // Recorded chunks → Blob → Object URL
+          const blob = new Blob(state.recordedChunks, { type: "video/webm" });
+          reenVideo.src = URL.createObjectURL(blob);
+        } else {
+          // File upload
+          reenVideo.src = state.reenactmentClip;
+        }
+
+        // Extract poses
+        let posesA = await extractPoses(origVideo);
+        let posesB = await extractPoses(reenVideo);
+
+        // Compare poses
+        state.score = comparePoses(
+          posesA,
+          posesB,
+          origVideo.videoWidth,
+          origVideo.videoHeight,
+          reenVideo.videoWidth,
+          reenVideo.videoHeight,
+        ).toFixed(1);
+
+        // // Feedback
+        // if (state.score >= 70) {
+        //   confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+        // } else {
+        //   alert("Your performance was below 70%..");
+        // }
+        // Feedback
+        if (state.score >= 70) {
+          confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+        }
+
+        state.analyzing = false;
+        m.redraw();
+      }
+
+      // // Start camera recording
+      // async function startRecording() {
+      //   const stream = await navigator.mediaDevices.getUserMedia({
+      //     video: true,
+      //     audio: true,
+      //   });
+      //   const videoEl = document.getElementById("cameraPreview");
+      //   videoEl.srcObject = null; // clear previous
+      //   videoEl.srcObject = stream;
+      //   videoEl.play();
+
+      //   state.recordedChunks = [];
+      //   state.stream = stream;
+      //   state.mediaRecorder = new MediaRecorder(stream);
+      //   state.mediaRecorder.ondataavailable = (e) => {
+      //     if (e.data.size > 0) state.recordedChunks.push(e.data);
+      //   };
+      //   state.mediaRecorder.onstop = () => {
+      //     const blob = new Blob(state.recordedChunks, { type: "video/webm" });
+      //     state.reenactmentClip = URL.createObjectURL(blob);
+      //     m.redraw();
+      //   };
+      //   state.mediaRecorder.start();
+      //   state.recording = true;
+      //   m.redraw();
+      // }
+      async function startRecording() {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
+
+        const videoEl = document.getElementById("cameraPreview");
+        videoEl.srcObject = null; // clear previous
+        videoEl.srcObject = stream;
+        videoEl.play();
+        state.stream = stream;
+        state.recordedChunks = [];
+
+        state.mediaRecorder = new MediaRecorder(stream);
+        state.mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) state.recordedChunks.push(e.data);
+        };
+        state.mediaRecorder.onstop = () => {
+          const blob = new Blob(state.recordedChunks, { type: "video/webm" });
+          state.reenactmentClip = URL.createObjectURL(blob);
+          state.progress = 0;
+          m.redraw();
+        };
+
+        // Countdown before recording starts
+        state.countdown = 6;
+        m.redraw();
+
+        let countdownInterval = setInterval(() => {
+          state.countdown--;
+          m.redraw();
+
+          if (state.countdown <= 0) {
+            clearInterval(countdownInterval);
+
+            // Start recording
+            state.mediaRecorder.start();
+            state.recording = true;
+            state.countdown = null;
+            m.redraw();
+
+            // Stop automatically after original clip duration
+            getVideoDuration(state.originalClip).then((duration) => {
+              let elapsed = 0;
+              let progressInterval = setInterval(() => {
+                elapsed++;
+                state.progress = Math.min(100, (elapsed / duration) * 100);
+                m.redraw();
+
+                if (elapsed >= duration) {
+                  clearInterval(progressInterval);
+                  stopRecording();
+                }
+              }, 1000);
+            });
+          }
+        }, 1000);
+      }
+
+      // Stop camera recording
+      // function stopRecording() {
+      //   navigator.mediaDevices
+      //     .getUserMedia({
+      //       video: true,
+      //       audio: true,
+      //     })
+      //     .then((stream) => {
+      //       const tracks = stream.getTracks();
+      //       tracks.forEach((track) => track.stop());
+      //       state.mediaRecorder.stop();
+      //       state.recording = false;
+      //       m.redraw();
+      //     });
+      // }
+      function stopRecording() {
+        if (state.stream) {
+          state.stream.getTracks().forEach((track) => track.stop()); // stop camera + mic
+          state.stream = null;
+        }
+
+        if (state.mediaRecorder) {
+          state.mediaRecorder.stop();
+          state.mediaRecorder = null;
+        }
+
+        state.recording = false;
+        m.redraw();
+      }
+
+      // Share score
+      function shareScore() {
+        const text = `I scored ${state.score}% on MimicMe!`;
+        navigator.clipboard.writeText(text).then(() => {
+          alert("Copied to clipboard: " + text);
+        });
+      }
+
+      // Mithril UI
+      const App = {
+        view: () =>
+          m("div.wrapper", [
+            m("h2", "🎬 MimicMe"),
+
+            m("div.originalDiv", [
+              m("label", "Upload Original Clip: "),
+              m("input[type=file]", {
+                accept: "video/*",
+                onchange: (e) => uploadFile(e, "originalClip"),
+              }),
+            ]),
+            state.originalClip &&
+              m("video", {
+                src: state.originalClip,
+                controls: true,
+                width: 300,
+              }),
+            m("hr", { width: "250px" }),
+            // m("div.reenactmentDiv", [
+            //   m("label", "Upload Reenactment: "),
+            //   m("input[type=file]", {
+            //     accept: "video/*, image/*",
+            //     onchange: (e) => uploadFile(e, "reenactmentClip"),
+            //   }),
+            // ]),
+            // state.reenactmentClip &&
+            //   m("video", {
+            //     src: state.reenactmentClip,
+            //     controls: true,
+            //     width: 300,
+            //   }),
+            //             m("div.reenactmentDiv", [
+            //   m("label", "Upload Reenactment Clip: "),
+            //   m("input[type=file]", {
+            //     accept: "video/*, image/*",
+            //     onchange: (e) => uploadFile(e, "reenactmentClip"),
+            //   }),
+            // ]),
+            // state.reenactmentClip &&
+            //   m("video", {
+            //     src: state.reenactmentClip,
+            //     controls: true,
+            //     width: 300,
+            //   }),
+            m("div.reenactmentChoice", [
+              m("label", [
+                m("input[type=radio]", {
+                  name: "reenactmentSource",
+                  value: "webcam",
+                  checked: state.reenactmentSource === "webcam",
+                  onclick: () => {
+                    state.reenactmentSource = "webcam";
+                    m.redraw();
+                  },
+                }),
+                " Use Webcam",
+              ]),
+              m("label", { style: { marginLeft: "10px" } }, [
+                m("input[type=radio]", {
+                  name: "reenactmentSource",
+                  value: "upload",
+                  checked: state.reenactmentSource === "upload",
+                  onclick: () => {
+                    state.reenactmentSource = "upload";
+                    m.redraw();
+                  },
+                }),
+                " Upload File",
+              ]),
+            ]),
+
+            m("div.vidCamPrevDiv", [
+              m("video#cameraPreview", {
+                width: 284,
+                autoplay: true,
+                muted: true,
+              }),
+              // !state.recording &&
+              //   m("button", { onclick: startRecording }, "🎥 Start Recording"),
+              // state.recording &&
+              //   m("button", { onclick: stopRecording }, "⏹ Stop Recording"),
+              state.reenactmentSource === "webcam"
+                ? m("div.webcamControls", [
+                    !state.recording &&
+                      state.countdown === null &&
+                      m(
+                        "button",
+                        { onclick: startRecording },
+                        "🎥 Start Recording",
+                      ),
+                    state.countdown !== null &&
+                      !state.recording &&
+                      m(
+                        "div",
+                        {
+                          style: {
+                            fontSize: "16px",
+                            fontWeight: "bold",
+                            marginTop: "10px",
+                          },
+                        },
+                        `Recording starts in ${state.countdown}...`,
+                      ),
+                    state.recording &&
+                      m("div", [
+                        // m(
+                        //   "button",
+                        //   { onclick: stopRecording },
+                        //   "⏹ Stop Recording",
+                        // ),
+                        m(
+                          "div",
+                          {
+                            style: {
+                              color: "red",
+                              fontWeight: "bold",
+                              marginBottom: "10px",
+                            },
+                          },
+                          "Recording in progress...",
+                        ),
+                        m(
+                          "div.progressBar",
+                          {
+                            style: {
+                              width: "250px",
+                              height: "15px",
+                              border: "1px solid #333",
+                              // background: "#eee",
+                              background: "orange",
+                              position: "relative",
+                            },
+                          },
+                          [
+                            m("div.progressFill", {
+                              style: {
+                                width: `${state.progress}%`,
+                                height: "100%",
+                                background: "#4caf50",
+                                transition: "width 1s linear",
+                              },
+                            }),
+                          ],
+                        ),
+                      ]),
+                    state.reenactmentClip &&
+                      m("video", {
+                        src: state.reenactmentClip,
+                        controls: true,
+                        width: 284,
+                      }),
+                  ])
+                : m("div.reenactmentDiv", [
+                    m("label", "Upload Reenactment Clip: "),
+                    m("input[type=file]", {
+                      accept: "video/*",
+                      onchange: (e) => uploadFile(e, "reenactmentClip"),
+                    }),
+                    state.reenactmentClip &&
+                      m("video", {
+                        src: state.reenactmentClip,
+                        controls: true,
+                        width: 284,
+                      }),
+                  ]),
+
+              // m("button", { onclick: analyzeVideos }, "Analyze Performance"),
+              // m(
+              //   "button",
+              //   {
+              //     onclick: async () => {
+              //       state.analyzing = true;
+              //       m.redraw(); // update UI immediately
+
+              //       await analyzeVideos();
+
+              //       state.analyzing = false;
+              //       m.redraw(); // restore button text
+              //     },
+              //   },
+              //   state.analyzing ? "Analyzing..." : "Analyze Performance",
+              // ),
+              // Button with spinner
+              m(
+                "button",
+                {
+                  onclick: async () => {
+                    state.analyzing = true;
+                    m.redraw();
+
+                    await analyzeVideos();
+
+                    state.analyzing = false;
+                    m.redraw();
+                  },
+                },
+                [
+                  state.analyzing
+                    ? m("span", [
+                        m("span.spinner", { style: { marginRight: "8px" } }),
+                        "Analyzing...",
+                      ])
+                    : "Analyze Performance",
+                ],
+              ),
+              state.reenactmentClip &&
+                m(
+                  "button",
+                  {
+                    onclick: resetState,
+                    style: {
+                      marginTop: "10px",
+                      background: "#f44336",
+                      color: "#fff",
+                    },
+                  },
+                  "Reset",
+                ),
+            ]),
+
+            state.score &&
+              m("div.score", [
+                "Score: " + state.score + "%",
+                m("div", [
+                  m("button", { onclick: shareScore }, "Share Result"),
+                ]),
+              ]),
+          ]),
+      };
+
+      m.mount(document.getElementById("app"), App);
+    </script>
+  </body>
+</html>
