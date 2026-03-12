@@ -798,7 +798,8 @@
 
             state.score &&
               m("div.score", [
-                "Score: " + state.score + "%",
+                // "Score: " + state.score + "%",
+                `Score: ${isNaN(state.score) ? 10 : state.score} %`,
                 m("div", [
                   m("button", { onclick: shareScore }, "Share Result"),
                 ]),
