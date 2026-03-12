@@ -360,7 +360,7 @@
           scores.push(similarity);
         }
 
-        return scores.reduce((a, b) => a + b, 0) / scores.length;
+        return scores.reduce((a, b) => a + b, 0) / scores.length ?? 0;
       }
 
       // // Main analysis
@@ -436,16 +436,16 @@
           reenVideo.videoHeight,
         ).toFixed(1);
 
-        // // Feedback
-        // if (state.score >= 70) {
-        //   confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
-        // } else {
-        //   alert("Your performance was below 70%..");
-        // }
         // Feedback
         if (state.score >= 70) {
           confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+        } else {
+          alert("Your performance was below 70%..");
         }
+        // Feedback
+        // if (state.score >= 70) {
+        //   confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+        // }
 
         state.analyzing = false;
         m.redraw();
